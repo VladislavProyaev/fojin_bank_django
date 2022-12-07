@@ -41,13 +41,14 @@ class RabbitMQ:
                 *args,
                 **kwargs
             ) -> Any:
+                headers = {'Authorization': request.META['HTTP_AUTHORIZATION']}
                 body = json.dumps(request.data.copy()).encode('utf-8')
-                properties = self.build_properties()
+                properties = self.build_properties(headers=headers)
                 self.publish_message(body, properties, routing_key=routing_key)
 
                 for method, _, body in self.channel.consume(self.__queue_name):
                     self.channel.basic_ack(method.delivery_tag)
-                    answer, status = self.handle_delivery(body)
+                    answer, status, _ = self.handle_delivery(body)
                     self.channel.cancel()
 
                     if status:
@@ -108,28 +109,29 @@ class RabbitMQ:
                     body, properties, EndPoints.VALIDATE_ACTION
                 )
 
-                answer = self.get_answer(unique_message_id)
+                status, answer = self.get_answer(request, unique_message_id)
+                if action == PermissionActions.CREATE_ACCOUNT:
+                    if not status or not answer:
+                        raise APIException(code=404, detail=str(answer))
+
                 kwargs['available'] = answer
-                print('---------------------------------------------')
-                print(request.method, action, answer)
-                print('---------------------------------------------')
                 return function(permission, request, *args, **kwargs)
 
             return make_query
 
         return decorator
 
-    def get_answer(self, unique_message_id: str):
+    def get_answer(self, request: Request, unique_message_id: str):
         for method, _, body in self.channel.consume(self.__queue_name):
             self.channel.basic_ack(method.delivery_tag)
             answer, status, message_id = self.handle_delivery(body)
-            if not status:
-                raise APIException(code=404, detail=str(answer))
             self.channel.cancel()
             if message_id != unique_message_id:
-                self.get_answer(message_id)
+                self.get_answer(request, message_id)
+            if request.COOKIES.get('Authorization') is None:
+                answer = True
 
-            return answer
+            return status, answer
 
     @property
     def unique_message_id(self):

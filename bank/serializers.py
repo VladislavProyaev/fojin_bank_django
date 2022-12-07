@@ -59,17 +59,13 @@ class AccountSerializer(serializers.HyperlinkedModelSerializer):
 
 
 class AccountCreated(serializers.HyperlinkedModelSerializer):
+    accounts = serializers.HyperlinkedRelatedField(
+        many=True,
+        view_name='account-detail',
+        read_only=True,
+        lookup_field='user_id'
+    )
+
     class Meta:
         model = Account
-        fields = ['url', 'id', 'user_id', 'balance']
-
-
-class AccountCreateSerializer(serializers.Serializer):
-    name = serializers.CharField(write_only=True, required=True)
-    surname = serializers.CharField(write_only=True, required=True)
-    phone = serializers.CharField(write_only=True, required=True)
-    city = serializers.CharField(write_only=True, required=True)
-    password = serializers.CharField(write_only=True, required=True)
-    permission = serializers.CharField(
-        write_only=True, default='client', initial='client'
-    )
+        fields = ['url', 'id', 'user_id', 'balance', 'accounts']

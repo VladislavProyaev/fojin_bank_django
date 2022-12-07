@@ -20,8 +20,8 @@ class Transaction(models.Model):
 
 
 class Account(models.Model):
-    user_id = models.IntegerField(unique=True)
+    user_id = models.IntegerField()
     balance = models.IntegerField(default=0)
 
     def __str__(self) -> str:
-        return f'ID: {self.id}'
+        return f'Account {self.id}'
