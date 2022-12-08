@@ -164,7 +164,12 @@ class RabbitMQ:
         self, request: Request, view: type[ViewSetMixin], **kwargs
     ) -> bool:
         is_super_permission = self.is_super_permission(request)
-        if request.method != HTTPMethods.GET and is_super_permission:
+        if (
+            (
+                request.method != HTTPMethods.GET
+                or request.method != HTTPMethods.PUT
+            ) and is_super_permission
+        ):
             return False
 
         kwargs['is_super_permission'] = is_super_permission
