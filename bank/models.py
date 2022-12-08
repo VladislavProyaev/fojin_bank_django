@@ -18,6 +18,12 @@ class Transaction(models.Model):
     class Meta:
         ordering = ['timestamp']
 
+    def __str__(self) -> str:
+        return (
+            f'Amount {self.amount} From Account {self.sender_id} '
+            f'To Account {self.recipient_id}'
+        )
+
 
 class Account(models.Model):
     user_id = models.IntegerField()

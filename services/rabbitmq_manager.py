@@ -5,12 +5,15 @@ from functools import wraps
 from typing import Callable, Any
 
 import pika
+from django.contrib.auth.models import Permission
+from django.db.models import Q
 from pika.adapters.blocking_connection import BlockingChannel
 from rest_framework import viewsets
 from rest_framework.exceptions import APIException
-from rest_framework.permissions import BasePermission
 from rest_framework.request import Request
+from rest_framework.viewsets import ViewSetMixin
 
+from bank.models import Account, Transaction
 from common.actions import PermissionActions
 from common.endpoints import EndPoints
 from common.methods import HTTPMethods
@@ -20,6 +23,18 @@ from common.methods import HTTPMethods
 class RabbitMQMethod:
     method_name: str
     method_function: Callable
+
+
+class TokenNotProvided(APIException):
+    status_code = 401
+    default_detail = 'Token not provided.'
+    default_code = 'no_token'
+
+
+class RabbitError(APIException):
+    status_code = 400
+    default_detail = 'Something wont wrong. Please try again later.'
+    default_code = 'something_wont_wrong'
 
 
 class RabbitMQ:
@@ -36,12 +51,18 @@ class RabbitMQ:
         def decorator(function: Callable) -> Callable:
             @wraps(function)
             def make_query(
-                view: type[viewsets.ViewSet],
+                instance: type[viewsets.ViewSet] | type[Permission],
                 request: Request,
                 *args,
                 **kwargs
             ) -> Any:
-                headers = {'Authorization': request.META['HTTP_AUTHORIZATION']}
+                try:
+                    headers = {
+                        'Authorization': request.META['HTTP_AUTHORIZATION']
+                    }
+                except KeyError:
+                    raise TokenNotProvided()
+                is_super_permission = self.is_super_permission(request)
                 body = json.dumps(request.data.copy()).encode('utf-8')
                 properties = self.build_properties(headers=headers)
                 self.publish_message(body, properties, routing_key=routing_key)
@@ -50,30 +71,47 @@ class RabbitMQ:
                     self.channel.basic_ack(method.delivery_tag)
                     answer, status, _ = self.handle_delivery(body)
                     self.channel.cancel()
+                    answer['is_super_permission'] = is_super_permission
 
                     if status:
-                        return function(view, request, **answer)
+                        return function(instance, request, *args, **answer)
                     else:
-                        raise APIException(answer)
+                        raise RabbitError(answer)
 
             return make_query
 
         return decorator
 
     @staticmethod
-    def get_action(request: Request, *args) -> str:
+    def get_action(
+        request: Request,
+        view: type[ViewSetMixin],
+        **kwargs
+    ) -> str:
         # TODO
         from bank.views import AccountViewSet, TransactionViewSet
 
         method = request.method
-        view = args[0]
+        is_super_permission = kwargs['is_super_permission']
 
         # TODO Complete exceptions
         if isinstance(view, AccountViewSet):
             if method == HTTPMethods.GET:
-                if request.parser_context.get('kwargs'):
-                    return PermissionActions.VIEW_PROFILE
-                return PermissionActions.VIEW_ALL_PROFILES
+                pk = request.parser_context.get('kwargs').get('pk')
+                if pk is not None:
+                    if is_super_permission:
+                        return PermissionActions.VIEW_PROFILE
+                    user_id = kwargs.get('user_id')
+                    account = (
+                        Account.objects.filter(user_id=user_id, pk=pk).first()
+                    )
+                    if account is not None:
+                        return PermissionActions.VIEW_PROFILE
+                    return PermissionActions.VIEW_ALL_PROFILES
+
+                if is_super_permission:
+                    return PermissionActions.VIEW_ALL_PROFILES
+                return PermissionActions.VIEW_PROFILE
             elif method == HTTPMethods.POST:
                 return PermissionActions.CREATE_ACCOUNT
             elif method == HTTPMethods.PUT:
@@ -82,7 +120,23 @@ class RabbitMQ:
                 raise APIException(code=404)
         elif isinstance(view, TransactionViewSet):
             if method == HTTPMethods.GET:
-                return PermissionActions.VIEW_ALL_PROFILES
+                pk = request.parser_context.get('kwargs').get('pk')
+                if pk is not None:
+                    if is_super_permission:
+                        return PermissionActions.VIEW_PROFILE
+                    user_id = kwargs.get('user_id')
+                    transaction = Transaction.objects.filter(
+                        Q(sender_id__user_id=user_id)
+                        | Q(recipient_id__user_id=user_id),
+                        pk=pk
+                    ).first()
+                    if transaction is not None:
+                        return PermissionActions.VIEW_PROFILE
+                    return PermissionActions.VIEW_ALL_PROFILES
+
+                if is_super_permission:
+                    return PermissionActions.VIEW_ALL_PROFILES
+                return PermissionActions.VIEW_PROFILE
             elif method == HTTPMethods.POST:
                 return PermissionActions.CREATE_TRANSFER
             else:
@@ -90,36 +144,50 @@ class RabbitMQ:
         else:
             raise APIException(code=404)
 
-    def validate_action(self) -> Callable:
-        def decorator(function: Callable) -> Callable:
-            @wraps(function)
-            def make_query(
-                permission: type[BasePermission],
-                request: Request,
-                *args,
-                **kwargs
-            ) -> Any:
-                action = self.get_action(request, *args)
-                body = json.dumps({'action': action}).encode('utf-8')
-                unique_message_id = self.unique_message_id
-                properties = self.build_properties(
-                    request.COOKIES, unique_message_id
-                )
-                self.publish_message(
-                    body, properties, EndPoints.VALIDATE_ACTION
-                )
+    def is_super_permission(self, request: Request) -> bool:
+        headers = {
+            'Authorization': request.META['HTTP_AUTHORIZATION']
+        }
+        unique_message_id = self.unique_message_id
+        properties = self.build_properties(headers, unique_message_id)
+        self.publish_message(
+            b'', properties, EndPoints.IS_SUPER_PERMISSION
+        )
 
-                status, answer = self.get_answer(request, unique_message_id)
-                if action == PermissionActions.CREATE_ACCOUNT:
-                    if not status or not answer:
-                        raise APIException(code=404, detail=str(answer))
+        status, answer = self.get_answer(request, unique_message_id)
+        if not status:
+            raise APIException(code=404, detail=str(answer))
 
-                kwargs['available'] = answer
-                return function(permission, request, *args, **kwargs)
+        return answer
 
-            return make_query
+    def validate_action(
+        self, request: Request, view: type[ViewSetMixin], **kwargs
+    ) -> bool:
+        is_super_permission = self.is_super_permission(request)
+        if request.method != HTTPMethods.GET and is_super_permission:
+            return False
 
-        return decorator
+        kwargs['is_super_permission'] = is_super_permission
+        action = self.get_action(request, view, **kwargs)
+        body = json.dumps({'action': action}).encode('utf-8')
+        unique_message_id = self.unique_message_id
+
+        headers = {
+            'Authorization': request.META['HTTP_AUTHORIZATION']
+        }
+        properties = self.build_properties(
+            headers, unique_message_id
+        )
+        self.publish_message(
+            body, properties, EndPoints.VALIDATE_ACTION
+        )
+
+        status, answer = self.get_answer(request, unique_message_id)
+        if action == PermissionActions.CREATE_ACCOUNT:
+            if not status or not answer:
+                raise APIException(code=404, detail=str(answer))
+
+        return answer
 
     def get_answer(self, request: Request, unique_message_id: str):
         for method, _, body in self.channel.consume(self.__queue_name):
@@ -128,8 +196,6 @@ class RabbitMQ:
             self.channel.cancel()
             if message_id != unique_message_id:
                 self.get_answer(request, message_id)
-            if request.COOKIES.get('Authorization') is None:
-                answer = True
 
             return status, answer
 
