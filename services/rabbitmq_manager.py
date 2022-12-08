@@ -165,10 +165,8 @@ class RabbitMQ:
     ) -> bool:
         is_super_permission = self.is_super_permission(request)
         if (
-            (
-                request.method != HTTPMethods.GET
-                or request.method != HTTPMethods.PUT
-            ) and is_super_permission
+            is_super_permission
+            and request.method not in [HTTPMethods.GET, HTTPMethods.PUT]
         ):
             return False
 
