@@ -1,13 +1,15 @@
 from django.db.models import Q
 from django.http import QueryDict
-from rest_framework import viewsets, status
+from rest_framework import viewsets, status, mixins
 from rest_framework.exceptions import APIException, PermissionDenied
 from rest_framework.request import Request
 from rest_framework.response import Response
+from rest_framework.viewsets import GenericViewSet
 
 from bank.models import Transaction, Account
 from bank.permissions import IsOwnerOrReadOnly
-from bank.serializers import TransactionSerializer, AccountSerializer
+from bank.serializers import TransactionSerializer, AccountSerializer, \
+    AccountPUTSerializer
 from common.endpoints import EndPoints
 from services import rabbit_mq
 
@@ -18,7 +20,25 @@ class NoPermission(APIException):
     default_code = 'no_permission'
 
 
-class TransactionViewSet(viewsets.ModelViewSet):
+class AccountNotFound(APIException):
+    status_code = 404
+    default_detail = 'Account Not Found'
+    default_code = 'account_not_found'
+
+
+class IncorrectAmount(APIException):
+    status_code = 400
+    default_detail = 'Amount should be more then 0'
+    default_code = 'incorrect_amount'
+
+
+class TransactionViewSet(
+    mixins.CreateModelMixin,
+    mixins.RetrieveModelMixin,
+    mixins.DestroyModelMixin,
+    mixins.ListModelMixin,
+    GenericViewSet
+):
     queryset = Transaction.objects.all()
     serializer_class = TransactionSerializer
     permission_classes = [IsOwnerOrReadOnly]
@@ -43,8 +63,20 @@ class TransactionViewSet(viewsets.ModelViewSet):
     def create(self, request: Request, *args, **kwargs):
         sender_id = request.data['sender_id']
         account_id = kwargs['user_id']
+        recipient_id = request.data['recipient_id']
+        amount = request.data['amount']
 
-        account = Account.objects.get(pk=sender_id)
+        if amount <= 0:
+            raise IncorrectAmount()
+
+        try:
+            account = Account.objects.get(pk=sender_id)
+        except Account.DoesNotExist:
+            raise AccountNotFound('Sender account not found!')
+        try:
+            Account.objects.get(pk=recipient_id)
+        except Account.DoesNotExist:
+            raise AccountNotFound('Recipient account not found!')
         if account.user_id != account_id:
             raise NoPermission()
 
@@ -56,6 +88,11 @@ class AccountViewSet(viewsets.ModelViewSet):
     serializer_class = AccountSerializer
 
     permission_classes = [IsOwnerOrReadOnly]
+
+    def get_serializer_class(self):
+        if self.action == 'update':
+            return AccountPUTSerializer
+        return self.serializer_class
 
     def permission_denied(self, request, message=None, code=None):
         raise PermissionDenied()
@@ -94,3 +131,7 @@ class AccountViewSet(viewsets.ModelViewSet):
             )
         serializer = self.get_serializer(user_accounts, many=True)
         return Response(serializer.data)
+
+    @rabbit_mq.query(EndPoints.GET_USER)
+    def update(self, request, *args, **kwargs):
+        return super().update(request, *args, **kwargs)

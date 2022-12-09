@@ -65,14 +65,12 @@ class AccountSerializer(serializers.HyperlinkedModelSerializer):
         fields = ['url', 'id', 'user_id', 'balance', 'transactions']
 
 
-class AccountCreated(serializers.HyperlinkedModelSerializer):
-    accounts = serializers.HyperlinkedRelatedField(
-        many=True,
-        view_name='account-detail',
-        read_only=True,
-        lookup_field='user_id'
+class AccountPUTSerializer(serializers.HyperlinkedModelSerializer):
+    transactions = serializers.HyperlinkedRelatedField(
+        many=True, view_name='transaction-detail', read_only=True
     )
+    user_id = serializers.CharField(read_only=True)
 
     class Meta:
         model = Account
-        fields = ['url', 'id', 'user_id', 'balance', 'accounts']
+        fields = ['url', 'id', 'user_id', 'balance', 'transactions']
